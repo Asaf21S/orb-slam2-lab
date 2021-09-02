@@ -18,202 +18,126 @@
 * along with ORB-SLAM2. If not, see <http://www.gnu.org/licenses/>.
 */
 
-
-#include<iostream>
-#include<algorithm>
-#include<fstream>
-#include<chrono>
+// includes:
+#include <iostream>
+#include <algorithm>
+#include <fstream>
+#include <chrono>
 #include <unistd.h>	
-#include<opencv2/core/core.hpp>
-
-#include<System.h>
+#include <opencv2/core/core.hpp>
+#include <System.h>
 #include <Converter.h>	
+#include <thread>
+#include "ctello.h"
+
+// usings:
 using namespace std;
-
-const char* const TELLO_STREAM_URL{"udp://0.0.0.0:11111"};
-
 using ctello::Tello;
 using cv::CAP_FFMPEG;
 using cv::imshow;
 using cv::VideoCapture;
 using cv::waitKey;
 
-void LoadImages(const string &strFile, vector<string> &vstrImageFilenames, vector<double> &vTimestamps);
-void SaveMap(ORB_SLAM2::System SLAM);
+// function declarations:
+void GetFrames();
+void ScanRoom();
+void StoreMap(ORB_SLAM2::System &SLAM);
 
+// global variables:
+const char* const TELLO_STREAM_URL{"udp://0.0.0.0:11111"};
+Tello tello{};
 cv::Mat frame;
-
-void GetFrames()
-{
-    tello.SendCommand("streamon");
-    while (!(tello.ReceiveResponse()));
-    tello.SendCommand("takeoff");
-    while(!tello.ReceiveResponse());
-    VideoCapture capture{TELLO_STREAM_URL, CAP_FFMPEG};
-    while (true)
-    {
-        //change here
-        capture >> frame;
-        if (!frame.empty())
-        {
-            imshow("CTello Stream", frame);
-        }
-        if (waitKey(1) == 27)
-        {
-            break;
-        }
-    }
-}
+std::atomic<bool> isScanning, beginFrame, streamOn;
+// isScanning - for transfering the images to the orbslam only while scanning the room.
+// beginFrame - to make sure orbslam is initialized only after we begin scanning and images are available.
+// streamOn - to make sure to land only after the stream is off.
 
 int main(int argc, char **argv)
 {
-    if(argc != 4)
+    if(argc != 3)
     {
-        cerr << endl << "Usage: ./mono_tum path_to_vocabulary path_to_settings path_to_sequence" << endl;
+        cerr << endl << "Usage: ./mono_tum path_to_vocabulary path_to_settings" << endl;
         return 1;
     }
-
-    // tello
-    Tello tello{};
-    if (!tello.Bind())LoadImages
+    if (!tello.Bind())
     {
         return 0;
     }
+    isScanning = true;
+    beginFrame = false;
+    streamOn = true;
 
-    thread t1 (GetFrames);
-/////////////////////////
+    thread th1 (GetFrames);
+    thread th2 (ScanRoom);
+    while (!beginFrame){ sleep(0.1); }
 
-    /*cv::VideoCapture cap();
-    if (!cap.isOpened())
-    {
-        cerr << endl  <<"Could not open camera feed."  << endl;
-        return -1;
-    }*/
-
-   
-
-    // Retrieve paths to images
-    vector<string> vstrImageFilenames;
-    vector<double> vTimestamps;
-    string strFile = string(argv[3])+"/rgb.txt";
-    LoadImages(strFile, vstrImageFilenames, vTimestamps);
-
-    int nImages = vstrImageFilenames.size();
-
-    
-
-    // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM2::System SLAM(argv[1],argv[2],ORB_SLAM2::System::MONOCULAR,true);
 
-    Vector for tracking time statistics
-    vector<float> vTimesTrack;
-    vTimesTrack.resize(nImages);
-
-    cout << endl << "-------" << endl;
-    cout << "Start processing sequence ..." << endl;
-    cout << "Images in the sequence: " << nImages << endl << endl;
-
-    // Main loop
-    //cv::Mat im;
-    int timeStamps=0;
-    for(int ni=0; ni<nImages; ni++)
+    while (isScanning)
     {
-        // Read image from file
-        im = cv::imread(string(argv[3])+"/"+vstrImageFilenames[ni],CV_LOAD_IMAGE_UNCHANGED);
-        double tframe = vTimestamps[ni];
-
-        cap>>frame;
-
-        if(im.empty())
-        {
-            cerr << endl << "Failed to load image at: "
-                 << string(argv[3]) << "/" << vstrImageFilenames[ni] << endl;
-            return 1;
-        }
-
-#ifdef COMPILEDWITHC11
-        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
-#else
-        std::chrono::monotonic_clock::time_point t1 = std::chrono::monotonic_clock::now();
-#endif
-
-        // Pass the image to the SLAM system
-        SLAM.TrackMonocular(im,timeStamps/*tframe*/);
-
-#ifdef COMPILEDWITHC11
-        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
-#else
-        std::chrono::monotonic_clock::time_point t2 = std::chrono::monotonic_clock::now();
-#endif
-
-
-        double ttrack= std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count();
-
-        vTimesTrack[ni]=ttrack;
-
-        // Wait to load the next frame
-        double T=0;
-        if(ni<nImages-1)
-            T = vTimestamps[ni+1]-tframe;
-        else if(ni>0)
-            T = tframe-vTimestamps[ni-1];
-
-        if(ttrack<T)
-            usleep((T-ttrack)*1e6);
+        if(!frame.empty())
+            SLAM.TrackMonocular(frame, 0.1);
     }
-
-    SaveMap(SLAM);
-
-    // Stop all threads
+    
+    StoreMap(SLAM);
     SLAM.Shutdown();
-
-    // Tracking time statistics
-    sort(vTimesTrack.begin(),vTimesTrack.end());
-    float totaltime = 0;
-    for(int ni=0; ni<nImages; ni++)
-    {
-        totaltime+=vTimesTrack[ni];
-    }
-    cout << "-------" << endl << endl;
-    cout << "median tracking time: " << vTimesTrack[nImages/2] << endl;
-    cout << "mean tracking time: " << totaltime/nImages << endl;
-
-    // Save camera trajectory
     SLAM.SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
-
     return 0;
 }
 
-void LoadImages(const string &strFile, vector<string> &vstrImageFilenames, vector<double> &vTimestamps)
+// responsible for capturing the video from the drone
+void GetFrames()
 {
-    ifstream f;
-    f.open(strFile.c_str());
+    tello.SendCommand("streamon");
+    while (!tello.ReceiveResponse()) { sleep(0.2);}
+    VideoCapture capture{TELLO_STREAM_URL, CAP_FFMPEG};
+    if(!capture.isOpened())
+        cout << "Error opening video stream or file" << endl;
 
-    // skip first three lines
-    string s0;
-    getline(f,s0);
-    getline(f,s0);
-    getline(f,s0);
-
-    while(!f.eof())
+    while (isScanning)
     {
-        string s;
-        getline(f,s);
-        if(!s.empty())
-        {
-            stringstream ss;
-            ss << s;
-            double t;
-            string sRGB;
-            ss >> t;
-            vTimestamps.push_back(t);
-            ss >> sRGB;
-            vstrImageFilenames.push_back(sRGB);
-        }
+        capture >> frame;
+        beginFrame = true;
+        sleep(0.1);
     }
+    
+    tello.SendCommand("streamoff");
+    while (!tello.ReceiveResponse()) { sleep(0.2);}
+
+    streamOn = false;
 }
 
-void SaveMap(ORB_SLAM2::System SLAM){
+// responsible for spinning the drone
+void ScanRoom()
+{
+    int degree = 20;
+    while (!beginFrame){}
+    
+    tello.SendCommand("takeoff");
+    while (!tello.ReceiveResponse()) { sleep(0.2);}
+    sleep(5);
+    for (int i = degree; i <= 360; i+=degree)
+    {
+        // cout << "rotatingforward" << endl;
+        tello.SendCommand("cw 20");
+        while (!tello.ReceiveResponse()) { sleep(0.2);}
+        sleep(0.5);
+        tello.SendCommand("up 20");
+        while (!tello.ReceiveResponse()) { sleep(0.2);}
+        sleep(0.5);
+        tello.SendCommand("down 20");
+        while (!tello.ReceiveResponse()) { sleep(0.2);}
+        sleep(0.5);
+    }
+    isScanning = false;
+
+    while(streamOn){}
+    tello.SendCommand("land");
+    while (!tello.ReceiveResponse()) { sleep(0.2);}
+}
+
+// responsible for spinning the drone
+void StoreMap(ORB_SLAM2::System &SLAM){
     std::vector<ORB_SLAM2::MapPoint*> mapPoints = SLAM.GetMap()->GetAllMapPoints();
     std::ofstream pointData;
     pointData.open("/tmp/pointData.csv");
