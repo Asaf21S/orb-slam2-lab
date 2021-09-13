@@ -81,36 +81,41 @@ int main(int argc, char **argv)
     cv::Mat mat;
 
     thread th1 (GetFrames);
+    sleep(3);
     thread th2 (ScanRoom);
-    while (!beginFrame){ sleep(0.1); }
+    while (!beginFrame){
+        sleep(0.2);
+    }
 
     ORB_SLAM2::System SLAM(argv[1],argv[2],ORB_SLAM2::System::MONOCULAR,true);
 
     while (isScanning)
     {
         if(!frame.empty()){
-            mat = SLAM.TrackMonocular(frame, 0.1);
+            mat = SLAM.TrackMonocular(frame, 0.2);
             if (!mat.empty())
             {
                 startRotating = true;
                 mat = mat.clone().inv();
                 euler = rot2euler(mat);
             }
+            //else cout << " mat empty ";
         }
-        else
-            cout << "no frame" << endl;
+        //else
+            //cout << "no frame"; << //endl;
     }
     
     StoreMap(SLAM);
     SLAM.Shutdown();
     SLAM.SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
-    cout << euler << endl;
+    cout << "final drone degree: " << euler.at<double>(2) << endl;
     return 0;
 }
 
 // responsible for capturing the video from the drone
 void GetFrames()
 {
+    
     tello.SendCommand("streamon");
     while (!tello.ReceiveResponse()) { sleep(0.2);}
     VideoCapture capture{TELLO_STREAM_URL, CAP_FFMPEG};
@@ -119,11 +124,14 @@ void GetFrames()
 
     while (isScanning)
     {
+        
         capture >> frame;
+        //cout << frame;
         beginFrame = true;
         sleep(0.1);
     }
-    
+        startRotating = false;
+
     tello.SendCommand("streamoff");
     while (!tello.ReceiveResponse()) { sleep(0.2);}
 
@@ -133,26 +141,34 @@ void GetFrames()
 // responsible for spinning the drone
 void ScanRoom()
 {
-    int degree = 24;
-    while (!beginFrame){ sleep(0.2);}
+    int degree = 20;
+    while (!beginFrame){
+        sleep(1);
+        tello.SendCommand("battery?");
+    }
     
     tello.SendCommand("takeoff");
     while (!tello.ReceiveResponse()) { sleep(0.2);}
-    sleep(5);
+    sleep(4);
 
-    while (!startRotating){ sleep(0.2);}
+    while (!startRotating){
+        sleep(0.5);
+        tello.SendCommand("up 10");
+        sleep(0.2);
+        tello.SendCommand("down 10");
+    }
     for (int i = degree; i <= 360; i+=degree)
     {
         // cout << "rotatingforward" << endl;
-        tello.SendCommand("cw 24");
+        tello.SendCommand("ccw 20");
         while (!tello.ReceiveResponse()) { sleep(0.2);}
-        sleep(0.5);
+        sleep(2.5);
         tello.SendCommand("up 20");
         while (!tello.ReceiveResponse()) { sleep(0.2);}
-        sleep(0.5);
+        sleep(1.5);
         tello.SendCommand("down 20");
         while (!tello.ReceiveResponse()) { sleep(0.2);}
-        sleep(0.5);
+        sleep(1.5);
     }
     isScanning = false;
 
@@ -229,7 +245,7 @@ void NavigateToDoor()
     tello.SendCommand("cw " + std::to_string(degToDoor - euler.at<double>(2)));
     while (!tello.ReceiveResponse()) { sleep(0.2);}
     sleep(0.5);
-    tello.SendCommand("forward 100");
+    tello.SendCommand("forward 200");
     while (!tello.ReceiveResponse()) { sleep(0.2);}
     sleep(0.5);
     moving = false;
